@@ -22,7 +22,10 @@ import renameProject from '../lib/renameProject.js';
 
 const router = express.Router();
 
-// Helper to get JWT token from WebODM
+/**
+ * Helper to get JWT token from WebODM.
+ * @returns {Promise<string>} JWT token string
+ */
 async function getWebODMToken() {
   const res = await axios.post(`${WEBODM_URL}/token-auth/`, {
     username: WEBODM_USERNAME,
@@ -31,7 +34,16 @@ async function getWebODMToken() {
   return res.data.token;
 }
 
-// POST /api/push-images
+/**
+ * @api {post} /api/push-images Push images to a WebODM project and create a task
+ * @apiBody {string[]} images Array of base64-encoded images (with or without data URI)
+ * @apiBody {string} project_name Name of the WebODM project
+ * @apiBody {object} [options] Optional task options
+ * @apiSuccess {object} task Created task data
+ * @apiError (400) Images array or project_name missing
+ * @apiError (404) Project not found
+ * @apiError (500) Failed to create task
+ */
 router.post('/push-images', async function(req, res) {
   const { images, project_name, options } = req.body;
   if (!images || !Array.isArray(images) || images.length === 0) {
@@ -111,7 +123,11 @@ router.post('/push-images', async function(req, res) {
   }
 });
 
-// GET /api/get-projects
+/**
+ * @api {get} /api/get-projects Get all WebODM projects
+ * @apiSuccess {object[]} projects List of projects
+ * @apiError (500) Failed to fetch projects
+ */
 router.get('/get-projects', async function(req, res) {
   try {
     const response = await axios.get(`${WEBODM_URL}/projects/`, { auth: { username: WEBODM_USERNAME, password: WEBODM_PASSWORD } });
@@ -121,7 +137,13 @@ router.get('/get-projects', async function(req, res) {
   }
 });
 
-// GET /api/get-tasks
+/**
+ * @api {get} /api/get-tasks Get all tasks for a project
+ * @apiQuery {string} project_id Project ID
+ * @apiSuccess {object[]} tasks List of tasks
+ * @apiError (400) project_id required
+ * @apiError (500) Failed to fetch tasks
+ */
 router.get('/get-tasks', async function(req, res) {
   const projectId = req.query.project_id;
   if (!projectId) {
@@ -136,7 +158,13 @@ router.get('/get-tasks', async function(req, res) {
   }
 });
 
-// GET /api/get-task-status
+/**
+ * @api {get} /api/get-task-status Get status for a task
+ * @apiQuery {string} task_id Task ID
+ * @apiSuccess {object} status Task status and info
+ * @apiError (400) task_id required
+ * @apiError (500) Failed to fetch task status
+ */
 router.get('/get-task-status', async function(req, res) {
   const taskId = req.query.task_id;
   if (!taskId) {
@@ -151,7 +179,13 @@ router.get('/get-task-status', async function(req, res) {
   }
 });
 
-// POST /api/create-project
+/**
+ * @api {post} /api/create-project Create a new WebODM project
+ * @apiBody {string} name Project name
+ * @apiSuccess {object} project Created project data
+ * @apiError (400) Project name required
+ * @apiError (500) Failed to create project
+ */
 router.post('/create-project', async function(req, res) {
   const { name } = req.body;
   if (!name) {
@@ -170,7 +204,13 @@ router.post('/create-project', async function(req, res) {
   }
 });
 
-// POST /api/delete-project
+/**
+ * @api {post} /api/delete-project Delete a WebODM project
+ * @apiBody {string} project_id Project ID
+ * @apiSuccess {object} result Deletion result
+ * @apiError (400) project_id required
+ * @apiError (500) Failed to delete project
+ */
 router.post('/delete-project', async function(req, res) {
   const { project_id } = req.body;
   if (!project_id) {
@@ -185,7 +225,14 @@ router.post('/delete-project', async function(req, res) {
   }
 });
 
-// POST /api/rename-project
+/**
+ * @api {post} /api/rename-project Rename a WebODM project
+ * @apiBody {string} project_id Project ID
+ * @apiBody {string} new_name New project name
+ * @apiSuccess {object} result Rename result
+ * @apiError (400) project_id and new_name required
+ * @apiError (500) Failed to rename project
+ */
 router.post('/rename-project', async function(req, res) {
   const { project_id, new_name } = req.body;
   if (!project_id || !new_name) {
@@ -200,7 +247,16 @@ router.post('/rename-project', async function(req, res) {
   }
 });
 
-// POST /api/commit-task-to-map
+/**
+ * @api {post} /api/commit-task-to-map Commit a completed task's orthophoto and shapefile to a map
+ * @apiBody {string} task_id Task ID
+ * @apiBody {string} map_name Map name (must exist in mappings)
+ * @apiSuccess {object} result Paths to orthophoto and shapefile
+ * @apiError (400) task_id and map_name required
+ * @apiError (404) Map name not found in mappings or orthophoto not found
+ * @apiError (409) Task is not completed yet
+ * @apiError (500) Failed to commit task
+ */
 router.post('/commit-task-to-map', async function(req, res) {
   const { task_id, map_name } = req.body;
   if (!task_id || !map_name) {
