@@ -1,18 +1,26 @@
-require('dotenv').config();
-var express = require('express');
-var router = express.Router();
-var axios = require('axios'); // Install axios if not present
-const fs = require('fs');
-const path = require('path');
-const FormData = require('form-data');
-const { execFile } = require('child_process');
+import dotenv from 'dotenv';
+dotenv.config();
+import express from 'express';
+import axios from 'axios';
+import fs from 'fs';
+import path from 'path';
+import FormData from 'form-data';
+import { getProjects } from '../lib/webodm.js';
+import {
+  WEBODM_URL, WEBODM_USERNAME, WEBODM_PASSWORD, OSGEO4W_ROOT, MAPPINGS_PATH
+} from '../lib/constants.js';
+import {
+  loadMappings,
+  getDestDir,
+  downloadOrthophoto,
+  runGdalPolygonize
+} from '../lib/commitTask.js';
+import getTasks from '../lib/getTasks.js';
+import getTaskStatus from '../lib/getTaskStatus.js';
+import deleteProject from '../lib/deleteProject.js';
+import renameProject from '../lib/renameProject.js';
 
-// Replace with your WebODM server URL
-const WEBODM_URL = 'http://localhost:8000/api';
-const WEBODM_USERNAME = process.env.WEBODM_USERNAME;
-const WEBODM_PASSWORD = process.env.WEBODM_PASSWORD;
-
-const mappingsPath = path.join(__dirname, '..', 'data', 'map_mappings.json');
+const router = express.Router();
 
 // Helper to get JWT token from WebODM
 async function getWebODMToken() {
@@ -37,10 +45,8 @@ router.post('/push-images', async function(req, res) {
     const token = await getWebODMToken();
 
     // 1. Get all projects and find the one with the given name
-    const projectsResp = await axios.get(`${WEBODM_URL}/projects/`, {
-      headers: { Authorization: `JWT ${token}` }
-    });
-    const project = projectsResp.data.results.find(p => p.name === project_name);
+    const projectsResp = await getProjects(token);
+    const project = projectsResp.results.find(p => p.name === project_name);
     if (!project) {
       return res.status(404).json({ error: 'Project not found' });
     }
@@ -61,7 +67,7 @@ router.post('/push-images', async function(req, res) {
         base64Data = matches[2];
       }
       const buffer = Buffer.from(base64Data, 'base64');
-      const tempPath = path.join(__dirname, `temp_upload_${Date.now()}_${i}.${ext}`);
+      const tempPath = path.join(process.cwd(), `temp_upload_${Date.now()}_${i}.${ext}`);
       fs.writeFileSync(tempPath, buffer);
       tempFiles.push(tempPath);
       form.append('images', fs.createReadStream(tempPath), {
@@ -123,11 +129,8 @@ router.get('/get-tasks', async function(req, res) {
   }
   try {
     const token = await getWebODMToken();
-    const response = await axios.get(
-      `${WEBODM_URL}/projects/${projectId}/tasks/`,
-      { headers: { Authorization: `JWT ${token}` } }
-    );
-    res.json(response.data);
+    const tasks = await getTasks(token, projectId);
+    res.json(tasks);
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch tasks', details: err.message });
   }
@@ -141,11 +144,8 @@ router.get('/get-task-status', async function(req, res) {
   }
   try {
     const token = await getWebODMToken();
-    const response = await axios.get(
-      `${WEBODM_URL}/tasks/${taskId}/`,
-      { headers: { Authorization: `JWT ${token}` } }
-    );
-    res.json({ status: response.data.status, task: response.data });
+    const status = await getTaskStatus(token, taskId);
+    res.json(status);
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch task status', details: err.message });
   }
@@ -178,11 +178,8 @@ router.post('/delete-project', async function(req, res) {
   }
   try {
     const token = await getWebODMToken();
-    await axios.delete(
-      `${WEBODM_URL}/projects/${project_id}/`,
-      { headers: { Authorization: `JWT ${token}` } }
-    );
-    res.json({ message: 'Project deleted' });
+    const result = await deleteProject(token, project_id);
+    res.json(result);
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete project', details: err.message });
   }
@@ -196,12 +193,8 @@ router.post('/rename-project', async function(req, res) {
   }
   try {
     const token = await getWebODMToken();
-    const response = await axios.patch(
-      `${WEBODM_URL}/projects/${project_id}/`,
-      { name: new_name },
-      { headers: { Authorization: `JWT ${token}` } }
-    );
-    res.json({ message: 'Project renamed', project: response.data });
+    const result = await renameProject(token, project_id, new_name);
+    res.json(result);
   } catch (err) {
     res.status(500).json({ error: 'Failed to rename project', details: err.message });
   }
@@ -214,26 +207,16 @@ router.post('/commit-task-to-map', async function(req, res) {
     return res.status(400).json({ error: 'task_id and map_name required' });
   }
 
-  // 1. Load mappings
   let mappings;
   try {
-    mappings = JSON.parse(fs.readFileSync(mappingsPath, 'utf8'));
+    mappings = loadMappings();
   } catch (err) {
     return res.status(500).json({ error: 'Failed to read map mappings', details: err.message });
   }
-  const destDir = mappings[map_name];
+  const destDir = getDestDir(map_name, mappings);
   if (!destDir) {
     return res.status(404).json({ error: 'Map name not found in mappings' });
   }
-
-  // 2. Get OSGeo4W root and construct paths
-  const osgeoRoot = process.env.OSGEO4W_ROOT;
-  if (!osgeoRoot) {
-    return res.status(500).json({ error: 'OSGEO4W_ROOT not set in .env' });
-  }
-  // You may need to adjust the Python version below if you use a different one
-  const pythonPath = path.join(osgeoRoot, 'bin', 'python.exe');
-  const gdalPolygonizePath = path.join(osgeoRoot, 'apps', 'Python37', 'Scripts', 'gdal_polygonize.py');
 
   try {
     const token = await getWebODMToken();
@@ -258,46 +241,19 @@ router.post('/commit-task-to-map', async function(req, res) {
       return res.status(404).json({ error: 'Orthophoto not found for this task' });
     }
 
-    // 5. Download orthophoto
-    const orthoResp = await axios.get(orthoUrl, {
-      headers: { Authorization: `JWT ${token}` },
-      responseType: 'stream'
-    });
+    // 5. Download orthophoto and run gdal_polygonize
+    const orthoPath = await downloadOrthophoto(orthoUrl, destDir, task_id, token);
+    const shapefilePath = await runGdalPolygonize(orthoPath, destDir, task_id);
 
-    if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
-    const orthoPath = path.join(destDir, `task_${task_id}_orthophoto.tif`);
-    const writer = fs.createWriteStream(orthoPath);
-    orthoResp.data.pipe(writer);
-
-    writer.on('finish', () => {
-      // 6. Run gdal_polygonize.py to create shapefile
-      const shapefileBase = path.join(destDir, `task_${task_id}_index`);
-      execFile(
-        pythonPath,
-        [gdalPolygonizePath, orthoPath, '-f', 'ESRI Shapefile', shapefileBase],
-        (error, stdout, stderr) => {
-          if (error) {
-            return res.status(500).json({ error: 'GDAL polygonize failed', details: stderr || error.message });
-          }
-          res.json({
-            message: 'Orthophoto and shapefile committed to map',
-            orthophoto: orthoPath,
-            shapefile: `${shapefileBase}.shp`
-          });
-        }
-      );
-    });
-
-    writer.on('error', (err) => {
-      res.status(500).json({ error: 'Failed to save orthophoto', details: err.message });
+    res.json({
+      message: 'Orthophoto and shapefile committed to map',
+      orthophoto: orthoPath,
+      shapefile: shapefilePath
     });
 
   } catch (err) {
-    if (err.response && err.response.data) {
-      return res.status(500).json({ error: 'Failed to commit task', details: err.response.data });
-    }
     res.status(500).json({ error: 'Failed to commit task', details: err.message });
   }
 });
 
-module.exports = router;
+export default router;
