@@ -5,6 +5,7 @@ import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
 import FormData from 'form-data';
+import multer from 'multer';
 import { getProjects } from '../lib/webodm.js';
 import {
   WEBODM_URL, WEBODM_USERNAME, WEBODM_PASSWORD, OSGEO4W_ROOT, MAPPINGS_PATH
@@ -22,6 +23,15 @@ import renameProject from '../lib/renameProject.js';
 
 const router = express.Router();
 
+// Configure multer for larger files
+const upload = multer({ 
+  dest: 'uploads/',
+  limits: {
+    fileSize: 50 * 1024 * 1024, // 50MB per file
+    files: 100 // max 100 files
+  }
+});
+
 /**
  * Helper to get JWT token from WebODM.
  * @returns {Promise<string>} JWT token string
@@ -36,17 +46,19 @@ async function getWebODMToken() {
 
 /**
  * @api {post} /api/push-images Push images to a WebODM project and create a task
- * @apiBody {string[]} images Array of base64-encoded images (with or without data URI)
+ * @apiBody {File[]} images Array of image files (multipart/form-data)
  * @apiBody {string} project_name Name of the WebODM project
- * @apiBody {object} [options] Optional task options
+ * @apiBody {object} [options] Optional task options (as JSON string or fields)
  * @apiSuccess {object} task Created task data
  * @apiError (400) Images array or project_name missing
  * @apiError (404) Project not found
  * @apiError (500) Failed to create task
  */
-router.post('/push-images', async function(req, res) {
-  const { images, project_name, options } = req.body;
-  if (!images || !Array.isArray(images) || images.length === 0) {
+router.post('/push-images', upload.array('images', 100), async function(req, res) {
+  const { project_name, options } = req.body;
+  
+  const images = req.files;
+  if (!images || images.length === 0) {
     return res.status(400).json({ error: 'Images array required' });
   }
   if (!project_name) {
@@ -58,42 +70,43 @@ router.post('/push-images', async function(req, res) {
 
     // 1. Get all projects and find the one with the given name
     const projectsResp = await getProjects(token);
-    const project = projectsResp.results.find(p => p.name === project_name);
+    
+    // Debug: Log the actual response structure
+    console.log('Projects response:', JSON.stringify(projectsResp.data, null, 2));
+    
+    // Handle different possible response structures
+    let projects;
+    if (projectsResp.data && Array.isArray(projectsResp.data.results)) {
+      projects = projectsResp.data.results;
+    } else if (projectsResp.data && Array.isArray(projectsResp.data)) {
+      projects = projectsResp.data;
+    } else {
+      console.error('Unexpected projects response structure:', projectsResp.data);
+      return res.status(500).json({ error: 'Unexpected response structure from WebODM' });
+    }
+    
+    const project = projects.find(p => p.name === project_name);
     if (!project) {
       return res.status(404).json({ error: 'Project not found' });
     }
 
-    // 2. Prepare images as files for multipart/form-data
-    // We'll save base64 images to temp files, then attach them
-    const tempFiles = [];
+    // 2. Prepare images as files for multipart/form-data to WebODM
     const form = new FormData();
-    for (let i = 0; i < images.length; i++) {
-      const img = images[i];
-      // img should be a base64 string with data URI or just base64
-      let base64Data = img;
-      let ext = 'jpg';
-      if (img.startsWith('data:')) {
-        const matches = img.match(/^data:(image\/\w+);base64,(.+)$/);
-        if (!matches) continue;
-        ext = matches[1].split('/')[1];
-        base64Data = matches[2];
-      }
-      const buffer = Buffer.from(base64Data, 'base64');
-      const tempPath = path.join(process.cwd(), `temp_upload_${Date.now()}_${i}.${ext}`);
-      fs.writeFileSync(tempPath, buffer);
-      tempFiles.push(tempPath);
-      form.append('images', fs.createReadStream(tempPath), {
-        filename: `image${i + 1}.${ext}`,
-        contentType: `image/${ext}`
+    
+    // Add each image file to the form
+    images.forEach((file, i) => {
+      form.append('images', fs.createReadStream(file.path), {
+        filename: file.originalname || `image_${i}.jpg`,
+        contentType: file.mimetype || 'image/jpeg'
       });
-    }
+    });
 
     // 3. Add options if provided
     if (options) {
-      form.append('options', JSON.stringify(options));
+      form.append('options', typeof options === 'string' ? options : JSON.stringify(options));
     }
 
-    // 4. Create the task
+    // 4. Create the task with increased timeout for large uploads
     const taskResp = await axios.post(
       `${WEBODM_URL}/projects/${project.id}/tasks/`,
       form,
@@ -101,21 +114,39 @@ router.post('/push-images', async function(req, res) {
         headers: {
           ...form.getHeaders(),
           Authorization: `JWT ${token}`
-        }
+        },
+        timeout: 300000, // 5 minutes timeout for large uploads
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity
       }
     );
 
     // 5. Clean up temp files
-    tempFiles.forEach(f => fs.unlinkSync(f));
+    images.forEach(file => {
+      try {
+        fs.unlinkSync(file.path);
+      } catch (err) {
+        console.warn(`Failed to delete temp file: ${file.path}`, err.message);
+      }
+    });
 
     res.json(taskResp.data);
+    
   } catch (err) {
     // Clean up temp files on error
-    if (typeof tempFiles !== 'undefined') {
-      tempFiles.forEach(f => {
-        if (fs.existsSync(f)) fs.unlinkSync(f);
+    if (images) {
+      images.forEach(file => {
+        try {
+          if (fs.existsSync(file.path)) {
+            fs.unlinkSync(file.path);
+          }
+        } catch (cleanupErr) {
+          console.warn(`Failed to cleanup temp file: ${file.path}`, cleanupErr.message);
+        }
       });
     }
+    
+    console.error('Push images error:', err.message);
     if (err.response && err.response.data) {
       return res.status(500).json({ error: 'Failed to create task', details: err.response.data });
     }
