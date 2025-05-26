@@ -23,12 +23,14 @@ import renameProject from '../lib/renameProject.js';
 
 const router = express.Router();
 
-// Configure multer for larger files
+// Configure multer for MASSIVE file uploads
 const upload = multer({ 
   dest: 'uploads/',
   limits: {
-    fileSize: 50 * 1024 * 1024, // 50MB per file
-    files: 100 // max 100 files
+    fileSize: 500 * 1024 * 1024, // 500MB per file
+    files: 1000, // max 1000 files
+    fieldSize: 100 * 1024 * 1024, // 100MB for text fields
+    parts: 2000 // Total number of parts (files + fields)
   }
 });
 
@@ -59,17 +61,33 @@ async function getWebODMToken() {
  * @apiError (404) Project not found
  * @apiError (500) Failed to create task
  */
-router.post('/push-images', upload.array('images', 100), async function(req, res) {
-  console.log('=== PUSH IMAGES DEBUG ===');
-  console.log('📋 Request received at:', new Date().toISOString());
-  console.log('📁 Files received:', req.files ? req.files.length : 0);
-  console.log('📝 Body data:', req.body);
-  
+router.post('/push-images', upload.array('images', 1000), async function(req, res) {
   const { project_name, options } = req.body;
+  
+  // ========== DETAILED FILE COUNTING DEBUG ==========
+  console.log('\n=== MASSIVE UPLOAD DEBUG ===');
+  console.log('📋 Request received at:', new Date().toISOString());
+  console.log('🔍 req.files exists:', !!req.files);
+  console.log('🔍 req.files type:', typeof req.files);
+  console.log('🔍 req.files is array:', Array.isArray(req.files));
+  console.log('📁 TOTAL FILES RECEIVED IN THIS REQUEST:', req.files ? req.files.length : 0);
+  
+  // Log each individual file
+  if (req.files && req.files.length > 0) {
+    console.log('📋 Individual files received:');
+    req.files.forEach((file, index) => {
+      console.log(`  ${index + 1}. ${file.originalname} (${(file.size / 1024 / 1024).toFixed(2)}MB)`);
+    });
+  }
+  
+  console.log('📝 Request body keys:', Object.keys(req.body));
+  console.log('📝 Project name:', req.body.project_name);
+  console.log('=' .repeat(50));
+  
   const images = req.files;
   
   if (!images || images.length === 0) {
-    console.log('❌ No images provided');
+    console.log('❌ No images provided - this request had ZERO files');
     return res.status(400).json({ error: 'Images array required' });
   }
   if (!project_name) {
@@ -77,20 +95,17 @@ router.post('/push-images', upload.array('images', 100), async function(req, res
     return res.status(400).json({ error: 'project_name required' });
   }
 
-  console.log('✅ Project name:', project_name);
-  console.log('✅ Number of images:', images.length);
+  // Calculate total upload size
+  const totalSize = images.reduce((sum, file) => sum + file.size, 0);
+  const totalSizeMB = (totalSize / (1024 * 1024)).toFixed(2);
+  
+  console.log(`✅ CONFIRMED: Processing ${images.length} images for project: ${project_name}`);
+  console.log(`📊 Total upload size: ${totalSizeMB} MB`);
+  console.log(`📏 Average file size: ${(totalSize / images.length / (1024 * 1024)).toFixed(2)} MB`);
 
   try {
-    console.log('🔐 Step 1: Getting WebODM token...');
     const token = await getWebODMToken();
-    console.log('✅ Step 2: Token obtained successfully');
-
-    console.log('📊 Step 3: Getting projects from WebODM...');
     const projectsResp = await getProjects(token);
-    console.log('✅ Step 4: Projects response received');
-    
-    // Debug: Log the actual response structure
-    console.log('📄 Projects data:', JSON.stringify(projectsResp.data, null, 2));
     
     // Handle different possible response structures
     let projects;
@@ -103,43 +118,41 @@ router.post('/push-images', upload.array('images', 100), async function(req, res
       return res.status(500).json({ error: 'Unexpected response structure from WebODM' });
     }
     
-    console.log('🔍 Step 5: Looking for project:', project_name);
-    console.log('📋 Available projects:', projects.map(p => p.name));
-    
     const project = projects.find(p => p.name === project_name);
     if (!project) {
-      console.log('❌ Project not found!');
       return res.status(404).json({ 
         error: 'Project not found',
         available_projects: projects.map(p => p.name),
         looking_for: project_name
       });
     }
-    console.log('✅ Step 6: Project found with ID:', project.id);
 
-    console.log('📦 Step 7: Preparing form data...');
+    console.log(`📦 Creating FormData for upload: ${images.length} images...`);
     const form = new FormData();
     
-    // Add each image file to the form
+    // Add ALL images to FormData with progress logging
     images.forEach((file, i) => {
-      console.log(`📷 Adding image ${i + 1}: ${file.originalname}`);
+      if (i % 10 === 0 || i === images.length - 1) {
+        console.log(`📷 Adding images: ${i + 1}/${images.length} (${((i + 1) / images.length * 100).toFixed(1)}%)`);
+      }
+      
       form.append('images', fs.createReadStream(file.path), {
-        filename: file.originalname || `image_${i}.jpg`,
+        filename: file.originalname || `image_${i + 1}.jpg`,
         contentType: file.mimetype || 'image/jpeg'
       });
     });
 
-    // Prepare task options with fast-orthophoto enabled by default
     let taskOptions = [
-      { name: 'fast-orthophoto', value: true }
+      { name: 'fast-orthophoto', value: true },
+      { name: 'resize-to', value: 1024 },
+      { name: 'quality', value: 'medium' },
+      { name: 'pc-quality', value: 'medium' }
     ];
 
-    // If user provided additional options, merge them
     if (options) {
       try {
         const userOptions = typeof options === 'string' ? JSON.parse(options) : options;
         if (Array.isArray(userOptions)) {
-          // Merge user options with defaults (user options take precedence)
           const userOptionNames = userOptions.map(opt => opt.name);
           taskOptions = taskOptions.filter(opt => !userOptionNames.includes(opt.name));
           taskOptions = [...taskOptions, ...userOptions];
@@ -149,19 +162,16 @@ router.post('/push-images', upload.array('images', 100), async function(req, res
       }
     }
 
-    console.log('⚙️ Task options:', taskOptions);
+    console.log('⚙️ Task options for batch:', taskOptions);
     form.append('options', JSON.stringify(taskOptions));
 
-    // Add optional task name
-    const taskName = `Task_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}`;
+    const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+    const taskName = `Upload_${images.length}imgs_${totalSizeMB}MB_${timestamp}`;
     form.append('name', taskName);
 
-    console.log('🚀 Step 8: Creating task...');
-    console.log('🔗 Task URL:', `${WEBODM_URL}/api/projects/${project.id}/tasks/`);
-    console.log('🔑 Token preview:', token.substring(0, 20) + '...');
+    console.log(`🚀 Creating task with ${images.length} images (${totalSizeMB}MB)...`);
     console.log('📝 Task name:', taskName);
     
-    // Create the task with increased timeout for large uploads
     const taskResp = await axios.post(
       `${WEBODM_URL}/api/projects/${project.id}/tasks/`,
       form,
@@ -170,59 +180,79 @@ router.post('/push-images', upload.array('images', 100), async function(req, res
           ...form.getHeaders(),
           Authorization: `JWT ${token}`
         },
-        timeout: 300000, // 5 minutes timeout for large uploads
+        timeout: 0,
         maxContentLength: Infinity,
-        maxBodyLength: Infinity
+        maxBodyLength: Infinity,
+        maxRedirects: 0,
+        onUploadProgress: (progressEvent) => {
+          if (progressEvent.total) {
+            const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+            if (percentCompleted % 10 === 0) {
+              console.log(`📤 Upload progress: ${percentCompleted}% (${(progressEvent.loaded / (1024 * 1024)).toFixed(2)}MB / ${(progressEvent.total / (1024 * 1024)).toFixed(2)}MB)`);
+            }
+          }
+        }
       }
     );
 
-    console.log('🎉 Step 9: Task created successfully!');
+    console.log('🎉 Task created successfully!');
     console.log('📝 Task ID:', taskResp.data.id);
+    console.log('📊 Images in created task:', taskResp.data.images_count);
+    console.log('💾 Total size processed:', totalSizeMB, 'MB');
 
     // Clean up temp files
-    images.forEach(file => {
+    console.log('🧹 Cleaning up temporary files...');
+    const cleanupPromises = images.map(async (file, i) => {
       try {
-        fs.unlinkSync(file.path);
-        console.log('🗑️ Cleaned up temp file:', file.path);
+        await fs.promises.unlink(file.path);
+        if (i % 100 === 0) {
+          console.log(`🗑️ Cleaned up ${i + 1}/${images.length} temp files`);
+        }
       } catch (err) {
         console.warn(`⚠️ Failed to delete temp file: ${file.path}`, err.message);
       }
     });
+    
+    await Promise.all(cleanupPromises);
+    console.log('✅ All temporary files cleaned up');
 
-    // Return task info immediately so client can start polling for progress
     res.json({
       task: taskResp.data,
-      message: 'Task created successfully with fast-orthophoto option enabled',
-      poll_url: `/api/task-progress?task_id=${taskResp.data.id}`
+      message: `Task created successfully with ${images.length} images (${totalSizeMB}MB)`,
+      poll_url: `/api/task-progress?task_id=${taskResp.data.id}`,
+      stats: {
+        image_count: images.length,
+        total_size_mb: parseFloat(totalSizeMB),
+        average_size_mb: parseFloat((totalSize / images.length / (1024 * 1024)).toFixed(2))
+      }
     });
     
   } catch (err) {
-    console.error('=== PUSH IMAGES ERROR ===');
-    console.error('❌ Error message:', err.message);
-    console.error('❌ Error status:', err.response?.status);
-    console.error('❌ Error URL:', err.config?.url);
-    console.error('❌ Error headers:', err.response?.headers);
-    console.error('❌ Error data preview:', typeof err.response?.data === 'string' ? 
-      err.response.data.substring(0, 500) + '...' : err.response?.data);
+    console.error('=== UPLOAD ERROR ===');
+    console.error('❌ Error:', err.message);
+    console.error('❌ Status:', err.response?.status);
+    console.error('❌ Data:', err.response?.data);
     
     // Clean up temp files on error
     if (images) {
-      images.forEach(file => {
+      console.log('🧹 Cleaning up temp files after error...');
+      const cleanupPromises = images.map(async (file) => {
         try {
-          if (fs.existsSync(file.path)) {
-            fs.unlinkSync(file.path);
-            console.log('🗑️ Cleaned up temp file on error:', file.path);
+          if (await fs.promises.access(file.path).then(() => true).catch(() => false)) {
+            await fs.promises.unlink(file.path);
           }
         } catch (cleanupErr) {
           console.warn(`⚠️ Failed to cleanup temp file: ${file.path}`, cleanupErr.message);
         }
       });
+      await Promise.all(cleanupPromises);
     }
     
-    if (err.response && err.response.data) {
-      return res.status(500).json({ error: 'Failed to create task', details: err.response.data });
-    }
-    res.status(500).json({ error: 'Failed to create task', details: err.message });
+    res.status(500).json({ 
+      error: 'Failed to create task', 
+      details: err.message,
+      response_data: err.response?.data 
+    });
   }
 });
 
