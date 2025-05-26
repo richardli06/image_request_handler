@@ -301,11 +301,32 @@ router.post('/delete-project', async function(req, res) {
     return res.status(400).json({ error: 'project_id required' });
   }
   try {
+    console.log('Deleting project:', project_id);
     const token = await getWebODMToken();
-    const result = await deleteProject(token, project_id);
-    res.json(result);
+    console.log('Token obtained for delete');
+    
+    // Call delete directly with better error logging
+    await axios.delete(
+      `${WEBODM_URL}/api/projects/${project_id}/`,
+      { headers: { Authorization: `JWT ${token}` } }
+    );
+    
+    console.log('Delete successful for project:', project_id);
+    res.json({ message: 'Project deleted successfully' });
+    
   } catch (err) {
-    res.status(500).json({ error: 'Failed to delete project', details: err.message });
+    console.error('Delete error details:', {
+      message: err.message,
+      status: err.response?.status,
+      data: err.response?.data,
+      url: `${WEBODM_URL}/api/projects/${project_id}/`
+    });
+    res.status(500).json({ 
+      error: 'Failed to delete project', 
+      details: err.message,
+      status: err.response?.status,
+      response_data: err.response?.data
+    });
   }
 });
 
