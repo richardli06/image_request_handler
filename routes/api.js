@@ -1,5 +1,5 @@
-import dotenv from 'dotenv';
-dotenv.config();
+//import dotenv from 'dotenv';
+//dotenv.config();
 import express from 'express';
 import axios from 'axios';
 import fs from 'fs';
@@ -37,11 +37,16 @@ const upload = multer({
  * @returns {Promise<string>} JWT token string
  */
 async function getWebODMToken() {
-  const res = await axios.post(`${WEBODM_URL}/token-auth/`, {
-    username: WEBODM_USERNAME,
-    password: WEBODM_PASSWORD
-  });
-  return res.data.token;
+  try {
+    const response = await axios.post(`${WEBODM_URL}/api/token-auth/`, {
+      username: WEBODM_USERNAME,
+      password: WEBODM_PASSWORD
+    });
+    return response.data.token;
+  } catch (error) {
+    console.error('Failed to get WebODM token:', error.message);
+    throw error;
+  }
 }
 
 /**
@@ -55,24 +60,37 @@ async function getWebODMToken() {
  * @apiError (500) Failed to create task
  */
 router.post('/push-images', upload.array('images', 100), async function(req, res) {
-  const { project_name, options } = req.body;
+  console.log('=== PUSH IMAGES DEBUG ===');
+  console.log('📋 Request received at:', new Date().toISOString());
+  console.log('📁 Files received:', req.files ? req.files.length : 0);
+  console.log('📝 Body data:', req.body);
   
+  const { project_name, options } = req.body;
   const images = req.files;
+  
   if (!images || images.length === 0) {
+    console.log('❌ No images provided');
     return res.status(400).json({ error: 'Images array required' });
   }
   if (!project_name) {
+    console.log('❌ No project name provided');
     return res.status(400).json({ error: 'project_name required' });
   }
 
-  try {
-    const token = await getWebODMToken();
+  console.log('✅ Project name:', project_name);
+  console.log('✅ Number of images:', images.length);
 
-    // 1. Get all projects and find the one with the given name
+  try {
+    console.log('🔐 Step 1: Getting WebODM token...');
+    const token = await getWebODMToken();
+    console.log('✅ Step 2: Token obtained successfully');
+
+    console.log('📊 Step 3: Getting projects from WebODM...');
     const projectsResp = await getProjects(token);
+    console.log('✅ Step 4: Projects response received');
     
     // Debug: Log the actual response structure
-    console.log('Projects response:', JSON.stringify(projectsResp.data, null, 2));
+    console.log('📄 Projects data:', JSON.stringify(projectsResp.data, null, 2));
     
     // Handle different possible response structures
     let projects;
@@ -81,34 +99,48 @@ router.post('/push-images', upload.array('images', 100), async function(req, res
     } else if (projectsResp.data && Array.isArray(projectsResp.data)) {
       projects = projectsResp.data;
     } else {
-      console.error('Unexpected projects response structure:', projectsResp.data);
+      console.error('❌ Unexpected projects response structure:', projectsResp.data);
       return res.status(500).json({ error: 'Unexpected response structure from WebODM' });
     }
     
+    console.log('🔍 Step 5: Looking for project:', project_name);
+    console.log('📋 Available projects:', projects.map(p => p.name));
+    
     const project = projects.find(p => p.name === project_name);
     if (!project) {
-      return res.status(404).json({ error: 'Project not found' });
+      console.log('❌ Project not found!');
+      return res.status(404).json({ 
+        error: 'Project not found',
+        available_projects: projects.map(p => p.name),
+        looking_for: project_name
+      });
     }
+    console.log('✅ Step 6: Project found with ID:', project.id);
 
-    // 2. Prepare images as files for multipart/form-data to WebODM
+    console.log('📦 Step 7: Preparing form data...');
     const form = new FormData();
     
     // Add each image file to the form
     images.forEach((file, i) => {
+      console.log(`📷 Adding image ${i + 1}: ${file.originalname}`);
       form.append('images', fs.createReadStream(file.path), {
         filename: file.originalname || `image_${i}.jpg`,
         contentType: file.mimetype || 'image/jpeg'
       });
     });
 
-    // 3. Add options if provided
+    // Add options if provided
     if (options) {
       form.append('options', typeof options === 'string' ? options : JSON.stringify(options));
     }
 
-    // 4. Create the task with increased timeout for large uploads
+    console.log('🚀 Step 8: Creating task...');
+    console.log('🔗 Task URL:', `${WEBODM_URL}/api/projects/${project.id}/tasks/`);
+    console.log('🔑 Token preview:', token.substring(0, 20) + '...');
+    
+    // Create the task with increased timeout for large uploads
     const taskResp = await axios.post(
-      `${WEBODM_URL}/projects/${project.id}/tasks/`,
+      `${WEBODM_URL}/api/projects/${project.id}/tasks/`,
       form,
       {
         headers: {
@@ -121,32 +153,44 @@ router.post('/push-images', upload.array('images', 100), async function(req, res
       }
     );
 
-    // 5. Clean up temp files
+    console.log('🎉 Step 9: Task created successfully!');
+    console.log('📝 Task ID:', taskResp.data.id);
+
+    // Clean up temp files
     images.forEach(file => {
       try {
         fs.unlinkSync(file.path);
+        console.log('🗑️ Cleaned up temp file:', file.path);
       } catch (err) {
-        console.warn(`Failed to delete temp file: ${file.path}`, err.message);
+        console.warn(`⚠️ Failed to delete temp file: ${file.path}`, err.message);
       }
     });
 
     res.json(taskResp.data);
     
   } catch (err) {
+    console.error('=== PUSH IMAGES ERROR ===');
+    console.error('❌ Error message:', err.message);
+    console.error('❌ Error status:', err.response?.status);
+    console.error('❌ Error URL:', err.config?.url);
+    console.error('❌ Error headers:', err.response?.headers);
+    console.error('❌ Error data preview:', typeof err.response?.data === 'string' ? 
+      err.response.data.substring(0, 500) + '...' : err.response?.data);
+    
     // Clean up temp files on error
     if (images) {
       images.forEach(file => {
         try {
           if (fs.existsSync(file.path)) {
             fs.unlinkSync(file.path);
+            console.log('🗑️ Cleaned up temp file on error:', file.path);
           }
         } catch (cleanupErr) {
-          console.warn(`Failed to cleanup temp file: ${file.path}`, cleanupErr.message);
+          console.warn(`⚠️ Failed to cleanup temp file: ${file.path}`, cleanupErr.message);
         }
       });
     }
     
-    console.error('Push images error:', err.message);
     if (err.response && err.response.data) {
       return res.status(500).json({ error: 'Failed to create task', details: err.response.data });
     }
@@ -161,10 +205,19 @@ router.post('/push-images', upload.array('images', 100), async function(req, res
  */
 router.get('/get-projects', async function(req, res) {
   try {
-    const response = await axios.get(`${WEBODM_URL}/projects/`, { auth: { username: WEBODM_USERNAME, password: WEBODM_PASSWORD } });
+    const token = await getWebODMToken(); // Get JWT token
+    const response = await axios.get(`${WEBODM_URL}/api/projects/`, { // Add /api/ here
+      headers: { Authorization: `JWT ${token}` } // Use JWT instead of basic auth
+    });
     res.json(response.data);
   } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch projects' });
+    console.error('Failed to fetch projects:', err.message);
+    console.error('Response data:', err.response?.data);
+    res.status(500).json({ 
+      error: 'Failed to fetch projects', 
+      details: err.message,
+      status: err.response?.status 
+    });
   }
 });
 
@@ -225,7 +278,7 @@ router.post('/create-project', async function(req, res) {
   try {
     const token = await getWebODMToken();
     const response = await axios.post(
-      `${WEBODM_URL}/projects/`,
+      `${WEBODM_URL}/api/projects/`,  // ✅ Add /api/
       { name },
       { headers: { Authorization: `JWT ${token}` } }
     );
@@ -270,11 +323,33 @@ router.post('/rename-project', async function(req, res) {
     return res.status(400).json({ error: 'project_id and new_name required' });
   }
   try {
+    console.log('Renaming project:', { project_id, new_name });
     const token = await getWebODMToken();
-    const result = await renameProject(token, project_id, new_name);
-    res.json(result);
+    console.log('Token obtained for rename');
+    
+    // Instead of using renameProject function, do it directly here for debugging
+    const response = await axios.patch(
+      `${WEBODM_URL}/api/projects/${project_id}/`,
+      { name: new_name },
+      { headers: { Authorization: `JWT ${token}` } }
+    );
+    
+    console.log('Rename successful:', response.data);
+    res.json(response.data);
+    
   } catch (err) {
-    res.status(500).json({ error: 'Failed to rename project', details: err.message });
+    console.error('Rename error details:', {
+      message: err.message,
+      status: err.response?.status,
+      data: err.response?.data,
+      url: `${WEBODM_URL}/api/projects/${project_id}/`
+    });
+    res.status(500).json({ 
+      error: 'Failed to rename project', 
+      details: err.message,
+      status: err.response?.status,
+      response_data: err.response?.data
+    });
   }
 });
 
@@ -310,7 +385,7 @@ router.post('/commit-task-to-map', async function(req, res) {
 
     // 3. Get task info
     const taskResp = await axios.get(
-      `${WEBODM_URL}/tasks/${task_id}/`,
+      `${WEBODM_URL}/api/tasks/${task_id}/`,  // ✅ Add /api/
       { headers: { Authorization: `JWT ${token}` } }
     );
     const task = taskResp.data;
@@ -320,7 +395,7 @@ router.post('/commit-task-to-map', async function(req, res) {
 
     // 4. Get orthophoto asset info
     const assetsResp = await axios.get(
-      `${WEBODM_URL}/tasks/${task_id}/assets/`,
+      `${WEBODM_URL}/api/tasks/${task_id}/assets/`,  // ✅ Add /api/
       { headers: { Authorization: `JWT ${token}` } }
     );
     const orthoUrl = assetsResp.data.orthophoto;

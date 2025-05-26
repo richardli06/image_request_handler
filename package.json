@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "node ./index.js",
+    "dev": "nodemon ./index.js",
     "test": "mocha"
   },
   "dependencies": {
@@ -15,11 +16,13 @@
     "express": "~4.16.1",
     "http-errors": "~1.6.3",
     "jade": "~1.11.0",
-    "morgan": "~1.9.1"
+    "morgan": "~1.9.1",
+    "multer": "^2.0.0"
   },
   "devDependencies": {
     "chai": "^5.2.0",
     "mocha": "^11.4.0",
+    "nodemon": "^3.1.10",
     "sinon": "^20.0.0",
     "supertest": "^7.1.1"
   }

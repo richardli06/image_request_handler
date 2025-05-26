@@ -1,3 +1,12 @@
+import dotenv from 'dotenv';
+
+// Load environment variables FIRST, before other imports
+dotenv.config();
+
+console.log('App.js - Environment check:');
+console.log('WEBODM_USERNAME:', process.env.WEBODM_USERNAME);
+console.log('WEBODM_PASSWORD:', process.env.WEBODM_PASSWORD ? '***LOADED***' : 'NOT LOADED');
+
 import createError from 'http-errors';
 import express from 'express';
 import path from 'path';
@@ -38,3 +47,4 @@ app.use(function(err, req, res, next) {
 });
 
 export default app;
+
