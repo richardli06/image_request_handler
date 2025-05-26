@@ -129,14 +129,37 @@ router.post('/push-images', upload.array('images', 100), async function(req, res
       });
     });
 
-    // Add options if provided
+    // Prepare task options with fast-orthophoto enabled by default
+    let taskOptions = [
+      { name: 'fast-orthophoto', value: true }
+    ];
+
+    // If user provided additional options, merge them
     if (options) {
-      form.append('options', typeof options === 'string' ? options : JSON.stringify(options));
+      try {
+        const userOptions = typeof options === 'string' ? JSON.parse(options) : options;
+        if (Array.isArray(userOptions)) {
+          // Merge user options with defaults (user options take precedence)
+          const userOptionNames = userOptions.map(opt => opt.name);
+          taskOptions = taskOptions.filter(opt => !userOptionNames.includes(opt.name));
+          taskOptions = [...taskOptions, ...userOptions];
+        }
+      } catch (parseErr) {
+        console.warn('⚠️ Failed to parse user options, using defaults:', parseErr.message);
+      }
     }
+
+    console.log('⚙️ Task options:', taskOptions);
+    form.append('options', JSON.stringify(taskOptions));
+
+    // Add optional task name
+    const taskName = `Task_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}`;
+    form.append('name', taskName);
 
     console.log('🚀 Step 8: Creating task...');
     console.log('🔗 Task URL:', `${WEBODM_URL}/api/projects/${project.id}/tasks/`);
     console.log('🔑 Token preview:', token.substring(0, 20) + '...');
+    console.log('📝 Task name:', taskName);
     
     // Create the task with increased timeout for large uploads
     const taskResp = await axios.post(
@@ -166,7 +189,12 @@ router.post('/push-images', upload.array('images', 100), async function(req, res
       }
     });
 
-    res.json(taskResp.data);
+    // Return task info immediately so client can start polling for progress
+    res.json({
+      task: taskResp.data,
+      message: 'Task created successfully with fast-orthophoto option enabled',
+      poll_url: `/api/task-progress?task_id=${taskResp.data.id}`
+    });
     
   } catch (err) {
     console.error('=== PUSH IMAGES ERROR ===');
