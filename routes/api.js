@@ -301,23 +301,220 @@ router.get('/get-tasks', async function(req, res) {
 });
 
 /**
+ * @api {get} /api/get-tasks/:projectId Get all tasks for a project (alternative endpoint)
+ * @apiParam {string} projectId Project ID
+ * @apiSuccess {object[]} tasks List of tasks with detailed info
+ * @apiError (500) Failed to fetch tasks
+ */
+router.get('/get-tasks/:projectId', async function(req, res) {
+  const { projectId } = req.params;
+  try {
+    const token = await getWebODMToken();
+    const response = await axios.get(
+      `${WEBODM_URL}/api/projects/${projectId}/tasks/`,
+      { headers: { Authorization: `JWT ${token}` } }
+    );
+    res.json(response.data.results || response.data);
+  } catch (err) {
+    console.error('Failed to fetch tasks:', err.message);
+    res.status(500).json({ error: 'Failed to fetch tasks', details: err.message });
+  }
+});
+
+/**
  * @api {get} /api/get-task-status Get status for a task
  * @apiQuery {string} task_id Task ID
  * @apiSuccess {object} status Task status and info
  * @apiError (400) task_id required
  * @apiError (500) Failed to fetch task status
  */
-router.get('/get-task-status', async function(req, res) {
-  const taskId = req.query.task_id;
-  if (!taskId) {
-    return res.status(400).json({ error: 'task_id required' });
-  }
+//router.get('/get-task-status', async function(req, res) {
+  //const taskId = req.query.task_id;
+  //if (!taskId) {
+   // return res.status(400).json({ error: 'task_id required' });
+  //}
+  //try {
+   // const token = await getWebODMToken();
+   // const status = await getTaskStatus(token, taskId);
+   // res.json(status);
+  //} catch (err) {
+   // res.status(500).json({ error: 'Failed to fetch task status', details: err.message });
+  //}
+//});
+
+/**
+ * @api {get} /api/get-task-status/:taskId Get detailed status for a task
+ * @apiParam {string} taskId Task ID (UUID format)
+ * @apiSuccess {object} status Detailed task status including progress
+ * @apiError (404) Task not found
+ * @apiError (500) Failed to fetch task status
+ */
+router.get('/get-task-status/:taskId', async function(req, res) {
+  const { taskId } = req.params;
+  
+  console.log(`🔍 GET /api/get-task-status/${taskId} - Endpoint hit!`);
+  console.log('📋 Request params:', req.params);
+  console.log('📋 Full URL:', req.originalUrl);
+  
   try {
+    console.log(`📊 Getting task status for: ${taskId}`);
+    
     const token = await getWebODMToken();
-    const status = await getTaskStatus(token, taskId);
-    res.json(status);
+    const response = await axios.get(
+      `${WEBODM_URL}/api/tasks/${taskId}/`,
+      { 
+        headers: { Authorization: `JWT ${token}` },
+        timeout: 30000
+      }
+    );
+    
+    const taskData = response.data;
+    console.log(`✅ Task ${taskId} status: ${taskData.status}, progress: ${taskData.progress || 0}%`);
+    
+    res.json(taskData);
+    
   } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch task status', details: err.message });
+    if (err.response?.status === 404) {
+      console.error(`❌ Task ${taskId} not found in WebODM`);
+      res.status(404).json({ error: 'Task not found', taskId });
+    } else {
+      console.error(`❌ Failed to fetch task status for ${taskId}:`, err.message);
+      res.status(500).json({ 
+        error: 'Failed to fetch task status', 
+        details: err.message,
+        taskId 
+      });
+    }
+  }
+});
+
+/**
+ * @api {get} /api/task-progress Get task progress using query parameters
+ * @apiParam {string} task_id Task ID as query parameter
+ * @apiParam {string} project_id Project ID as query parameter
+ * @apiSuccess {object} progress Task progress information
+ * @apiError (400) task_id and project_id parameters required
+ * @apiError (500) Failed to fetch task progress
+ */
+router.get('/task-progress', async function(req, res) { 
+  const { task_id, project_id } = req.query;
+  
+  if (!task_id || !project_id) {
+    return res.status(400).json({ 
+      error: 'Both task_id and project_id parameters are required',
+      received: { task_id, project_id }
+    });
+  }
+  
+  try {
+    console.log(`📈 Getting task progress for: Task ${task_id} in Project ${project_id}`);
+    
+    const token = await getWebODMToken();
+    
+    // Use the correct WebODM API path: /api/projects/{project_id}/tasks/{task_id}/
+    const response = await axios.get(
+      `${WEBODM_URL}/api/projects/${project_id}/tasks/${task_id}/`,
+      { 
+        headers: { Authorization: `JWT ${token}` },
+        timeout: 30000
+      }
+    );
+    
+    const taskData = response.data;
+    
+    // Calculate overall progress based on WebODM task status and progress fields
+    let overallProgress = 0;
+    let stage = 'Unknown';
+    let isComplete = false;
+    let hasError = false;
+    
+    switch (taskData.status) {
+      case 40: // COMPLETED
+        overallProgress = 100;
+        stage = 'Complete';
+        isComplete = true;
+        break;
+        
+      case 30: // FAILED
+        stage = 'Failed';
+        hasError = true;
+        overallProgress = 0;
+        break;
+        
+      case 20: // RUNNING
+        // Calculate progress based on upload, resize, and running progress
+        const uploadProg = (taskData.upload_progress || 0) * 30; // 30% for upload
+        const resizeProg = (taskData.resize_progress || 0) * 20; // 20% for resize
+        const runningProg = (taskData.running_progress || 0) * 50; // 50% for processing
+        
+        overallProgress = Math.round(uploadProg + resizeProg + runningProg);
+        
+        if (taskData.upload_progress < 1) {
+          stage = 'Uploading images...';
+        } else if (taskData.resize_progress < 1) {
+          stage = 'Resizing images...';
+        } else {
+          stage = 'Processing orthophoto...';
+        }
+        break;
+        
+      case 10: // QUEUED
+        stage = 'Queued for processing';
+        overallProgress = 0;
+        break;
+        
+      case 50: // CANCELED
+        stage = 'Canceled';
+        overallProgress = 0;
+        break;
+        
+      default:
+        stage = `Status: ${taskData.status}`;
+        overallProgress = 0;
+    }
+    
+    console.log(`✅ Task ${task_id} - Status: ${taskData.status}, Stage: ${stage}, Progress: ${overallProgress}%`);
+    
+    // Return enhanced progress data
+    res.json({
+      task_id: task_id,
+      project_id: project_id,
+      status: taskData.status,
+      stage: stage,
+      progress: overallProgress,
+      upload_progress: Math.round((taskData.upload_progress || 0) * 100),
+      resize_progress: Math.round((taskData.resize_progress || 0) * 100),
+      running_progress: Math.round((taskData.running_progress || 0) * 100),
+      processing_time: taskData.processing_time,
+      is_complete: isComplete,
+      has_error: hasError,
+      last_error: taskData.last_error,
+      images_count: taskData.images_count,
+      name: taskData.name,
+      created_at: taskData.created_at,
+      // Include raw task data for debugging
+      raw_data: taskData
+    });
+    
+  } catch (err) {
+    console.error(`❌ Failed to fetch task progress for Task ${task_id} in Project ${project_id}:`, err.message);
+    
+    if (err.response?.status === 404) {
+      res.status(404).json({ 
+        error: 'Task not found', 
+        task_id,
+        project_id,
+        details: 'Task may not exist in this project or may not be initialized yet'
+      });
+    } else {
+      res.status(500).json({ 
+        error: 'Failed to fetch task progress', 
+        details: err.message,
+        task_id,
+        project_id,
+        status: err.response?.status
+      });
+    }
   }
 });
 
