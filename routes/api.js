@@ -14,9 +14,7 @@ import {
   loadMappings,
   getDestDir,
   downloadOrthophoto,
-  runGdalIndex,
-  runGdalIndexWithBatch,
-  runGdalIndexSpawn
+  runGdalIndex
 } from '../lib/commitTask.js';
 import getTasks from '../lib/getTasks.js';
 import getTaskStatus from '../lib/getTaskStatus.js';
@@ -731,54 +729,9 @@ router.post('/commit-task-to-map', async function(req, res) {
 
     // 4. Run gdaltindex to create shapefile index
     console.log(`🔧 Running gdaltindex to create shapefile index...`);
-    let shapefilePath;
+    let shapefilePath = await runGdalIndex(orthoPath, destDir, task_id);
+    console.log(`✅ Shapefile created at: ${shapefilePath}`);
     let shapefileError = null;
-
-    // Try multiple gdaltindex approaches
-    const gdalIndexApproaches = [
-      { name: 'Direct gdaltindex', func: runGdalIndex },
-      { name: 'Batch gdaltindex', func: runGdalIndexWithBatch },
-      { name: 'Spawn gdaltindex', func: runGdalIndexSpawn }
-    ];
-
-    for (const approach of gdalIndexApproaches) {
-      try {
-        console.log(`🔄 Trying ${approach.name} approach...`);
-        shapefilePath = await approach.func(orthoPath, destDir, task_id);
-        console.log(`✅ Shapefile created using ${approach.name}: ${shapefilePath}`);
-        break; // Success! Exit the loop
-      } catch (approachErr) {
-        console.error(`❌ ${approach.name} approach failed:`, approachErr.message);
-        shapefileError = approachErr.message;
-        
-        // Continue to next approach
-        if (approach === gdalIndexApproaches[gdalIndexApproaches.length - 1]) {
-          // This was the last approach
-          console.error(`❌ All gdaltindex approaches failed`);
-          
-          if (require_shapefile) {
-            return res.status(500).json({ 
-              error: 'Failed to create required shapefile with all gdaltindex methods', 
-              details: `All approaches failed. Last error: ${shapefileError}`,
-              task_id,
-              project_id,
-              map_name,
-              gdal_error: true,
-              approaches_tried: gdalIndexApproaches.map(a => a.name),
-              suggestions: [
-                'Check if MS4W/OSGeo4W is properly installed',
-                'Verify gdaltindex is accessible in command line',
-                'Try opening MS4W Shell manually and running: gdaltindex --help',
-                'Consider reinstalling GDAL tools'
-              ]
-            });
-          } else {
-            console.warn(`⚠️ Continuing without shapefile (require_shapefile=false)`);
-            shapefilePath = null;
-          }
-        }
-      }
-    }
 
     // 5. Prepare final assets (only orthophoto and shapefile)
     const downloadedAssets = {
