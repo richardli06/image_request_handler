@@ -14,7 +14,9 @@ import {
   loadMappings,
   getDestDir,
   downloadOrthophoto,
-  runGdalPolygonize
+  runGdalIndex,
+  runGdalIndexWithBatch,
+  runGdalIndexSpawn
 } from '../lib/commitTask.js';
 import getTasks from '../lib/getTasks.js';
 import getTaskStatus from '../lib/getTaskStatus.js';
@@ -632,18 +634,26 @@ router.post('/rename-project', async function(req, res) {
 /**
  * @api {post} /api/commit-task-to-map Commit a completed task's orthophoto and shapefile to a map
  * @apiBody {string} task_id Task ID
+ * @apiBody {string} project_id Project ID
  * @apiBody {string} map_name Map name (must exist in mappings)
+ * @apiBody {boolean} [require_shapefile=true] Whether shapefile creation is required for success
  * @apiSuccess {object} result Paths to orthophoto and shapefile
- * @apiError (400) task_id and map_name required
- * @apiError (404) Map name not found in mappings or orthophoto not found
+ * @apiError (400) task_id, project_id and map_name required
+ * @apiError (404) Map name not found in mappings or task not found
  * @apiError (409) Task is not completed yet
  * @apiError (500) Failed to commit task
  */
 router.post('/commit-task-to-map', async function(req, res) {
-  const { task_id, map_name } = req.body;
-  if (!task_id || !map_name) {
-    return res.status(400).json({ error: 'task_id and map_name required' });
+  const { task_id, project_id, map_name, require_shapefile = true } = req.body;
+  
+  if (!task_id || !project_id || !map_name) {
+    return res.status(400).json({ 
+      error: 'task_id, project_id and map_name required',
+      received: { task_id, project_id, map_name }
+    });
   }
+
+  console.log(`🗺️ Committing Task ${task_id} from Project ${project_id} to map: ${map_name}`);
 
   let mappings;
   try {
@@ -651,46 +661,178 @@ router.post('/commit-task-to-map', async function(req, res) {
   } catch (err) {
     return res.status(500).json({ error: 'Failed to read map mappings', details: err.message });
   }
+  
   const destDir = getDestDir(map_name, mappings);
   if (!destDir) {
-    return res.status(404).json({ error: 'Map name not found in mappings' });
+    return res.status(404).json({ 
+      error: 'Map name not found in mappings',
+      available_maps: Object.keys(mappings),
+      requested: map_name
+    });
   }
 
   try {
     const token = await getWebODMToken();
 
-    // 3. Get task info
+    // 1. Get task info using correct API path
+    console.log(`📊 Getting task info for Task ${task_id} in Project ${project_id}...`);
     const taskResp = await axios.get(
-      `${WEBODM_URL}/api/tasks/${task_id}/`,  // ✅ Add /api/
-      { headers: { Authorization: `JWT ${token}` } }
+      `${WEBODM_URL}/api/projects/${project_id}/tasks/${task_id}/`,
+      { 
+        headers: { Authorization: `JWT ${token}` },
+        timeout: 30000
+      }
     );
+    
     const task = taskResp.data;
-    if (task.status !== 'COMPLETED') {
-      return res.status(409).json({ error: 'Task is not completed yet', status: task.status });
+    console.log(`✅ Task status: ${task.status}, Available assets:`, task.available_assets);
+    
+    // Check if task is completed (status 40 = COMPLETED)
+    if (task.status !== 40) {
+      return res.status(409).json({ 
+        error: 'Task is not completed yet', 
+        current_status: task.status,
+        status_codes: {
+          10: 'QUEUED',
+          20: 'RUNNING', 
+          30: 'FAILED',
+          40: 'COMPLETED',
+          50: 'CANCELED'
+        }
+      });
     }
 
-    // 4. Get orthophoto asset info
-    const assetsResp = await axios.get(
-      `${WEBODM_URL}/api/tasks/${task_id}/assets/`,  // ✅ Add /api/
-      { headers: { Authorization: `JWT ${token}` } }
-    );
-    const orthoUrl = assetsResp.data.orthophoto;
-    if (!orthoUrl) {
-      return res.status(404).json({ error: 'Orthophoto not found for this task' });
+    // 2. Check if orthophoto asset is available
+    if (!task.available_assets || !task.available_assets.includes('orthophoto.tif')) {
+      return res.status(404).json({ 
+        error: 'Orthophoto not available for this task',
+        available_assets: task.available_assets || []
+      });
     }
 
-    // 5. Download orthophoto and run gdal_polygonize
-    const orthoPath = await downloadOrthophoto(orthoUrl, destDir, task_id, token);
-    const shapefilePath = await runGdalPolygonize(orthoPath, destDir, task_id);
+    // 3. Download orthophoto using correct download API
+    console.log(`📥 Downloading orthophoto from Task ${task_id}...`);
+    const orthoDownloadUrl = `${WEBODM_URL}/api/projects/${project_id}/tasks/${task_id}/download/orthophoto.tif`;
+    
+    let orthoPath;
+    try {
+      orthoPath = await downloadOrthophoto(orthoDownloadUrl, destDir, task_id, token);
+      console.log(`✅ Orthophoto downloaded to: ${orthoPath}`);
+    } catch (downloadErr) {
+      console.error(`❌ Failed to download orthophoto:`, downloadErr.message);
+      return res.status(500).json({ 
+        error: 'Failed to download orthophoto', 
+        details: downloadErr.message,
+        task_id,
+        project_id,
+        map_name
+      });
+    }
+
+    // 4. Run gdaltindex to create shapefile index
+    console.log(`🔧 Running gdaltindex to create shapefile index...`);
+    let shapefilePath;
+    let shapefileError = null;
+
+    // Try multiple gdaltindex approaches
+    const gdalIndexApproaches = [
+      { name: 'Direct gdaltindex', func: runGdalIndex },
+      { name: 'Batch gdaltindex', func: runGdalIndexWithBatch },
+      { name: 'Spawn gdaltindex', func: runGdalIndexSpawn }
+    ];
+
+    for (const approach of gdalIndexApproaches) {
+      try {
+        console.log(`🔄 Trying ${approach.name} approach...`);
+        shapefilePath = await approach.func(orthoPath, destDir, task_id);
+        console.log(`✅ Shapefile created using ${approach.name}: ${shapefilePath}`);
+        break; // Success! Exit the loop
+      } catch (approachErr) {
+        console.error(`❌ ${approach.name} approach failed:`, approachErr.message);
+        shapefileError = approachErr.message;
+        
+        // Continue to next approach
+        if (approach === gdalIndexApproaches[gdalIndexApproaches.length - 1]) {
+          // This was the last approach
+          console.error(`❌ All gdaltindex approaches failed`);
+          
+          if (require_shapefile) {
+            return res.status(500).json({ 
+              error: 'Failed to create required shapefile with all gdaltindex methods', 
+              details: `All approaches failed. Last error: ${shapefileError}`,
+              task_id,
+              project_id,
+              map_name,
+              gdal_error: true,
+              approaches_tried: gdalIndexApproaches.map(a => a.name),
+              suggestions: [
+                'Check if MS4W/OSGeo4W is properly installed',
+                'Verify gdaltindex is accessible in command line',
+                'Try opening MS4W Shell manually and running: gdaltindex --help',
+                'Consider reinstalling GDAL tools'
+              ]
+            });
+          } else {
+            console.warn(`⚠️ Continuing without shapefile (require_shapefile=false)`);
+            shapefilePath = null;
+          }
+        }
+      }
+    }
+
+    // 5. Prepare final assets (only orthophoto and shapefile)
+    const downloadedAssets = {
+      orthophoto_tif: orthoPath
+    };
+
+    if (shapefilePath) {
+      downloadedAssets.shapefile = shapefilePath;
+    }
+
+    const warnings = [];
+    if (shapefileError) {
+      warnings.push(`Shapefile creation failed: ${shapefileError}`);
+    }
+
+    console.log(`🎉 Task ${task_id} committed successfully to map ${map_name}`);
+    console.log(`📦 Final assets: orthophoto + ${shapefilePath ? 'shapefile' : 'no shapefile'}`);
 
     res.json({
-      message: 'Orthophoto and shapefile committed to map',
-      orthophoto: orthoPath,
-      shapefile: shapefilePath
+      message: 'Task orthophoto and shapefile committed to map successfully',
+      task_id,
+      project_id,
+      map_name,
+      destination_directory: destDir,
+      downloaded_assets: downloadedAssets,
+      available_assets: task.available_assets,
+      warnings,
+      shapefile_created: !!shapefilePath
     });
 
   } catch (err) {
-    res.status(500).json({ error: 'Failed to commit task', details: err.message });
+    console.error(`❌ Failed to commit task ${task_id} to map ${map_name}:`, err);
+    console.error(`❌ Error details:`, {
+      message: err.message,
+      stack: err.stack,
+      response: err.response?.data
+    });
+    
+    if (err.response?.status === 404) {
+      res.status(404).json({ 
+        error: 'Task not found', 
+        task_id,
+        project_id,
+        details: 'Task may not exist in this project'
+      });
+    } else {
+      res.status(500).json({ 
+        error: 'Failed to commit task', 
+        details: err.message,
+        task_id,
+        project_id,
+        map_name
+      });
+    }
   }
 });
 
