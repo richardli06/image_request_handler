@@ -146,7 +146,8 @@ router.post('/push-images', upload.array('images', 1000), async function(req, re
       { name: 'fast-orthophoto', value: true },
       { name: 'resize-to', value: 1024 },
       { name: 'quality', value: 'medium' },
-      { name: 'pc-quality', value: 'medium' }
+      { name: 'pc-quality', value: 'medium' },
+      { name: 'orthophoto-resolution', value: 5 }
     ];
 
     if (options) {
